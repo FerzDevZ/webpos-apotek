@@ -1,0 +1,314 @@
+// Prisma schema — POS Apotek (MVP)
+//
+// KEPUTUSAN DESAIN (lihat docs/DECISIONS.md):
+// 1. Semua UANG disimpan sebagai Int (rupiah utuh). Tidak ada float, tidak ada desimal.
+//    Rupiah tidak punya sen, jadi tidak perlu Decimal sama sekali.
+// 2. Semua JUMLAH STOK disimpan sebagai Int dalam SATUAN DASAR (tablet/pcs/ml terkecil).
+//    Konversi ke box/strip hanya untuk tampilan. Ini menghilangkan bug pembulatan stok.
+// 3. Tidak memakai `enum` Prisma supaya schema ini portabel SQLite <-> Postgres.
+//    Validasi nilai enum dilakukan di lapisan aplikasi (zod) — lihat src/lib/constants.ts.
+// 4. Default provider = sqlite (biar bisa langsung jalan di laptop apotek).
+//    Untuk produksi cukup ganti provider ke "postgresql" + DATABASE_URL.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+/// Profil apotek / klinik (single-row di MVP, tabel disiapkan untuk multi-outlet fase 2)
+model Outlet {
+  id        String   @id @default(cuid())
+  nama      String
+  alamat    String?
+  telp      String?
+  apoteker  String? // nama apoteker penanggung jawab
+  sia       String? // nomor SIA
+  sipa      String? // nomor SIPA
+  footer    String? // catatan kaki struk
+  createdAt DateTime @default(now())
+
+  users     User[]
+  sales     Sale[]
+  purchases Purchase[]
+}
+
+model User {
+  id           String   @id @default(cuid())
+  outletId     String?
+  outlet       Outlet?  @relation(fields: [outletId], references: [id])
+  nama         String
+  email        String   @unique
+  passwordHash String
+  role         String   @default("KASIR") // ADMIN | APOTEKER | KASIR
+  aktif        Boolean  @default(true)
+  createdAt    DateTime @default(now())
+
+  sales        Sale[]
+  movements    StockMovement[]
+}
+
+model Supplier {
+  id        String   @id @default(cuid())
+  nama      String
+  telp      String?
+  alamat    String?
+  createdAt DateTime @default(now())
+
+  batches   Batch[]
+  purchases Purchase[]
+}
+
+model Customer {
+  id        String   @id @default(cuid())
+  nama      String
+  telp      String?
+  alamat    String?
+  tipe      String   @default("UMUM") // UMUM | MEMBER
+  catatan   String?
+  createdAt DateTime @default(now())
+
+  sales     Sale[]
+  reseps    Resep[]
+}
+
+/// Master barang. `satuanDasar` = satuan terkecil yang dipakai untuk hitung stok (tablet, pcs, ml).
+model Item {
+  id            String   @id @default(cuid())
+  kode          String   @unique // kode internal, mis. OBT-0001
+  barcode       String?  @unique // barcode pabrik (EAN) — boleh kosong untuk racikan/alkes
+  nama          String
+  kategori      String? // Analgesik, Antibiotik, Alkes, ...
+  golongan      String   @default("BEBAS") // BEBAS | BEBAS_TERBATAS | KERAS | NARKOTIKA | PSIKOTROPIKA | ALKES | HERBAL
+  pabrik        String?
+  satuanDasar   String // tablet, kapsul, pcs, botol, tube, ml
+  requiresResep Boolean  @default(false)
+  bahanRacikan  Boolean  @default(false) // boleh dipakai sebagai bahan racikan
+  jualBebas     Boolean  @default(true) // boleh dijual tanpa resep (golongan bebas)
+  stokMinDasar  Int      @default(0) // alert stok minimum, dalam satuan dasar
+  hargaJualDasar Int     @default(0) // harga jual per satuan dasar (referensi; bisa beda per batch)
+  aktif         Boolean  @default(true)
+  catatan       String?
+  createdAt     DateTime @default(now())
+  updatedAt     DateTime @updatedAt
+
+  units         ItemUnit[]
+  batches       Batch[]
+  movements     StockMovement[]
+  saleItems     SaleItem[]
+  purchaseItems PurchaseItem[]
+  resepItems    ResepItem[]
+  disposals     ExpiryDisposal[]
+}
+
+/// Multi-satuan: 1 Box 10 Strip = 100 Tablet.
+/// `faktor` = berapa satuan dasar dalam 1 satuan ini. Satuan dasar selalu faktor = 1.
+model ItemUnit {
+  id        String  @id @default(cuid())
+  itemId    String
+  item      Item    @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  nama      String // Box, Strip, Tablet
+  faktor    Int // 100, 10, 1
+  hargaJual Int // harga jual untuk 1 satuan ini (rupiah)
+  barcode   String? // barcode khusus kemasan (opsional)
+  isDefault Boolean @default(false) // satuan yang dipilih default di kasir
+
+  saleItems SaleItem[]
+  purchaseItems PurchaseItem[]
+
+  @@unique([itemId, nama])
+  @@index([itemId])
+}
+
+/// Batch = satu kali penerimaan barang dengan nomor batch & tanggal kadaluarsa sendiri.
+/// Stok SELALU disimpan di sini, bukan di Item. Total stok item = sum(batch.qtySisa).
+model Batch {
+  id        String   @id @default(cuid())
+  itemId    String
+  item      Item     @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  supplierId String?
+  supplier  Supplier? @relation(fields: [supplierId], references: [id])
+  noBatch   String
+  expiry    DateTime
+  qtyAwal   Int // qty saat diterima (satuan dasar)
+  qtySisa   Int // qty sekarang (satuan dasar)
+  hargaBeli Int // harga beli per satuan dasar (rupiah)
+  createdAt DateTime @default(now())
+
+  saleItems   SaleItem[]
+  movements   StockMovement[]
+  disposals   ExpiryDisposal[]
+
+  @@index([itemId, expiry])
+  @@index([expiry])
+  @@unique([itemId, noBatch, expiry])
+}
+
+/// Ledger pergerakan stok. APPEND-ONLY: tidak pernah di-update/di-delete.
+/// qty positif = masuk, negatif = keluar. Ini sumber kebenaran untuk kartu stok.
+model StockMovement {
+  id        String   @id @default(cuid())
+  itemId    String
+  item      Item     @relation(fields: [itemId], references: [id])
+  batchId   String?
+  batch     Batch?   @relation(fields: [batchId], references: [id])
+  qty       Int // delta dalam satuan dasar
+  tipe      String // PURCHASE | SALE | RETURN_SUPPLIER | RETURN_CUSTOMER | ADJUST | DISPOSE | VOID_SALE
+  refType   String? // SALE | PURCHASE | DISPOSAL | MANUAL
+  refId     String?
+  userId    String?
+  user      User?    @relation(fields: [userId], references: [id])
+  catatan   String?
+  ts        DateTime @default(now())
+
+  @@index([itemId, ts])
+  @@index([refType, refId])
+}
+
+model Purchase {
+  id         String   @id @default(cuid())
+  noFaktur   String // nomor faktur PBF
+  outletId   String?
+  outlet     Outlet?  @relation(fields: [outletId], references: [id])
+  supplierId String?
+  supplier   Supplier? @relation(fields: [supplierId], references: [id])
+  tanggal    DateTime @default(now())
+  total      Int      @default(0)
+  catatan    String?
+  createdAt  DateTime @default(now())
+
+  items     PurchaseItem[]
+}
+
+model PurchaseItem {
+  id         String   @id @default(cuid())
+  purchaseId String
+  purchase   Purchase @relation(fields: [purchaseId], references: [id], onDelete: Cascade)
+  itemId     String
+  item       Item     @relation(fields: [itemId], references: [id])
+  unitId     String?
+  unit       ItemUnit? @relation(fields: [unitId], references: [id])
+  qtyUnit    Int
+  faktor     Int
+  qtyDasar   Int
+  hargaBeli  Int // per satuan dasar
+  noBatch    String
+  expiry     DateTime
+  batchId    String? // batch yang dihasilkan
+  subtotal   Int
+}
+
+model Sale {
+  id         String   @id @default(cuid())
+  noStruk    String   @unique
+  outletId   String?
+  outlet     Outlet?  @relation(fields: [outletId], references: [id])
+  kasirId    String?
+  kasir      User?    @relation(fields: [kasirId], references: [id])
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id])
+  resepId    String?  @unique
+  resep      Resep?   @relation(fields: [resepId], references: [id])
+  tanggal    DateTime @default(now())
+  subtotal   Int
+  diskon     Int      @default(0)
+  total      Int
+  bayar      Int
+  kembali    Int
+  metodeBayar String  @default("TUNAI") // TUNAI | QRIS | DEBIT | TRANSFER
+  status     String   @default("PAID") // PAID | VOID
+  voidedAt   DateTime?
+  voidReason String?
+  catatan    String?
+  createdAt  DateTime @default(now())
+
+  items      SaleItem[]
+
+  @@index([tanggal])
+}
+
+/// `batchId` di sini WAJIB. Ini yang membuat audit "obat ini keluar dari batch mana" mungkin.
+model SaleItem {
+  id          String   @id @default(cuid())
+  saleId      String
+  sale        Sale     @relation(fields: [saleId], references: [id], onDelete: Cascade)
+  itemId      String
+  item        Item     @relation(fields: [itemId], references: [id])
+  batchId     String
+  batch       Batch    @relation(fields: [batchId], references: [id])
+  unitId      String?
+  unit        ItemUnit? @relation(fields: [unitId], references: [id])
+  qtyUnit     Int // qty dalam satuan jual (mis. 2 strip)
+  faktor      Int // 10
+  qtyDasar    Int // 20 tablet
+  hargaSatuan Int // harga per satuan jual
+  diskon      Int      @default(0)
+  subtotal    Int
+  namaSnapshot String // nama saat transaksi (biar struk lama tidak berubah)
+  isRacikan   Boolean  @default(false)
+
+  @@index([itemId])
+  @@index([batchId])
+}
+
+model Resep {
+  id           String   @id @default(cuid())
+  noResep      String   @unique
+  tanggal      DateTime @default(now())
+  pasienNama   String
+  pasienTelp   String?
+  pasienAlamat String?
+  umur         Int?
+  dokter       String
+  noSIP        String?
+  tipe         String   @default("NON_RACIKAN") // NON_RACIKAN | RACIKAN
+  iter         Int      @default(1) // 1 = tidak boleh diulang
+  catatan      String?
+  customerId   String?
+  customer     Customer? @relation(fields: [customerId], references: [id])
+  createdAt    DateTime @default(now())
+
+  items        ResepItem[]
+  sale         Sale?
+
+  @@index([tanggal])
+}
+
+/// Satu baris resep. Untuk racikan: itemId = bahan, qty = jumlah bahan total (boleh pecahan → disimpan *1000? tidak: pakai qtyMilli).
+model ResepItem {
+  id          String   @id @default(cuid())
+  resepId     String
+  resep       Resep    @relation(fields: [resepId], references: [id], onDelete: Cascade)
+  itemId      String?
+  item        Item?    @relation(fields: [itemId], references: [id])
+  namaBahan   String // untuk racikan bisa bahan non-stok
+  qtyMilli    Int // jumlah dalam 1/1000 satuan dasar (mis. 2500 = 2.5 tablet)
+  satuan      String
+  aturanPakai String? // signa lengkap, mis. "3 x 1 tablet sesudah makan"
+  jumlahDosis Int? // jumlah bungkus/kapsul utk racikan
+  isRacikan   Boolean  @default(false)
+  subtotal    Int      @default(0)
+
+  @@index([resepId])
+}
+
+model ExpiryDisposal {
+  id        String   @id @default(cuid())
+  batchId   String
+  batch     Batch    @relation(fields: [batchId], references: [id])
+  itemId    String
+  item      Item     @relation(fields: [itemId], references: [id])
+  qty       Int // satuan dasar
+  alasan    String // EXPIRED | RUSAK | RETUR_PBF
+  catatan   String?
+  tanggal   DateTime @default(now())
+  userId    String?
+}
+
+model Setting {
+  key   String @id
+  value String
+}

@@ -1,26 +1,128 @@
 @import "tailwindcss";
 
+/*
+  Token desain WebPOS Apotek.
+  Netral di-tint ke arah hijau (hue 155) — bukan abu-abu murni, apalagi hitam/putih murni.
+  Hijau brand dipakai hemat: tombol utama, state aktif, aksen kecil (≤5% viewport).
+*/
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
-}
+  --surface-0: oklch(0.968 0.008 155); /* latar aplikasi */
+  --surface-1: oklch(0.988 0.004 155); /* kartu / panel */
+  --surface-2: oklch(0.945 0.010 155); /* inset: input, track meter, chip */
+  --border-subtle: oklch(0.885 0.012 155);
 
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
-  --font-mono: var(--font-geist-mono);
+  --text-primary: oklch(0.215 0.015 155);
+  --text-secondary: oklch(0.470 0.015 155);
+  --text-muted: oklch(0.520 0.012 155);
+
+  --brand: oklch(0.535 0.130 152);
+  --brand-deep: oklch(0.470 0.125 152);
+  --brand-soft: oklch(0.940 0.035 152);
+  --brand-ink: oklch(0.400 0.120 152);
+  /* teks di atas tombol brand — hampir putih, tetap bertint */
+  --on-brand: oklch(0.995 0.005 152);
+
+  --danger: oklch(0.530 0.185 25);
+  --warn: oklch(0.540 0.135 70);
+
+  /* Panel gelap login — sengaja tetap gelap di tema terang maupun gelap */
+  --panel: oklch(0.235 0.018 155);
+  --panel-ink: oklch(0.940 0.008 155);
+  --panel-muted: oklch(0.680 0.015 155);
+  --panel-accent: oklch(0.720 0.135 152);
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    --surface-0: oklch(0.165 0.010 155);
+    --surface-1: oklch(0.205 0.012 155);
+    --surface-2: oklch(0.250 0.014 155);
+    --border-subtle: oklch(0.300 0.014 155);
+
+    --text-primary: oklch(0.945 0.006 155);
+    --text-secondary: oklch(0.715 0.012 155);
+    --text-muted: oklch(0.660 0.010 155);
+
+    --brand: oklch(0.680 0.140 152);
+    --brand-deep: oklch(0.600 0.135 152);
+    --brand-soft: oklch(0.285 0.050 152);
+    --brand-ink: oklch(0.845 0.075 152);
+    /* di gelap, tombol brand terang -> teksnya harus gelap (putih cuma 2.7:1) */
+    --on-brand: oklch(0.180 0.025 152);
+
+    --danger: oklch(0.660 0.175 25);
+    --warn: oklch(0.740 0.125 75);
   }
 }
 
+@theme inline {
+  --color-bg: var(--surface-0);
+  --color-card: var(--surface-1);
+  --color-inset: var(--surface-2);
+  --color-line: var(--border-subtle);
+  --color-ink: var(--text-primary);
+  --color-ink-2: var(--text-secondary);
+  --color-muted: var(--text-muted);
+  --color-brand: var(--brand);
+  --color-brand-deep: var(--brand-deep);
+  --color-brand-soft: var(--brand-soft);
+  --color-brand-ink: var(--brand-ink);
+  --color-on-brand: var(--on-brand);
+  --color-danger: var(--danger);
+  --color-warn: var(--warn);
+  --color-panel: var(--panel);
+  --color-panel-ink: var(--panel-ink);
+  --color-panel-muted: var(--panel-muted);
+  --color-panel-accent: var(--panel-accent);
+
+  --font-sans: var(--font-geist-sans);
+  --font-display: var(--font-jakarta), var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--surface-0);
+  color: var(--text-primary);
+  font-family: var(--font-sans), system-ui, -apple-system, sans-serif;
+}
+
+/*
+  Kelas komponen bersama. Semua elemen interaktif punya state eksplisit:
+  default / hover / active / focus-visible / disabled (loading ditangani
+  lewat disabled + teks). Transisi properti spesifik — tidak ada transition-all.
+*/
+@layer components {
+  .card {
+    @apply rounded-xl border border-line bg-card;
+  }
+
+  .input {
+    @apply w-full rounded-lg border border-line bg-card px-3 py-2 text-sm text-ink outline-none transition-colors duration-150 placeholder:text-muted focus:border-brand focus:ring-2 focus:ring-brand/25;
+  }
+
+  .btn {
+    @apply inline-flex items-center justify-center gap-2 rounded-lg px-4 py-2 text-sm font-semibold outline-none transition-[background-color,border-color,color,transform] duration-150 ease-out active:scale-[0.98] focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-brand disabled:pointer-events-none disabled:opacity-55;
+  }
+
+  .btn-primary {
+    @apply bg-brand text-on-brand hover:bg-brand-deep;
+  }
+
+  .btn-outline {
+    @apply border border-line bg-card text-ink-2 hover:bg-inset hover:text-ink;
+  }
+
+  .chip {
+    @apply inline-flex items-center rounded-md bg-inset px-1.5 py-0.5 text-[10px] font-medium text-muted;
+  }
+}
+
+/* Hormati preferensi pengguna yang sensitif terhadap gerakan. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+  }
 }
